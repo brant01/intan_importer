@@ -1,0 +1,16 @@
+[package]
+name = "intan_importer"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust library for importing Intan data files."
+authors = ["Jason Brant"]
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+byteorder = "1.5.0"
+ndarray = "0.16.1"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
