@@ -291,8 +291,6 @@ fn read_signal_summary(fid: &mut File, header: &mut RhsHeader) -> Result<(), Int
         add_signal_group_information(header, fid)?;
     }
 
-    print_header_summary(header);
-
     Ok(())
 }
 
@@ -466,7 +464,7 @@ fn read_qstring(fid: &mut File) -> Result<String, IntanError> {
         return Ok(String::new());
     }
 
-    let current_position = fid.seek(SeekFrom::Current(0))?;
+    let current_position = fid.stream_position()?;
     let file_length = fid.seek(SeekFrom::End(0))?;
     fid.seek(SeekFrom::Start(current_position))?;
 
@@ -505,10 +503,10 @@ fn calculate_data_size<P: AsRef<Path>>(
     // Determine filesize and if any data is present
     let metadata = metadata(file_path)?;
     let filesize = metadata.len();
-    let data_present;
-    let bytes_remaining = filesize - fid.seek(SeekFrom::Current(0))?;
+    
+    let bytes_remaining = filesize - fid.stream_position()?;
 
-    data_present = bytes_remaining > 0;
+    let data_present = bytes_remaining > 0;
 
     // If the file size is somehow different than expected, raise an error
     if bytes_remaining % bytes_per_block as u64 != 0 {
@@ -930,7 +928,7 @@ fn read_digital_signal_type(
 
 // Helper function to check end of file
 fn check_end_of_file(filesize: u64, fid: &mut File) -> Result<(), Box<dyn std::error::Error>> {
-    let current_position = fid.seek(SeekFrom::Current(0))?;
+    let current_position = fid.stream_position()?;
     let bytes_remaining = filesize - current_position;
 
     if bytes_remaining != 0 {
