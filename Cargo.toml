@@ -2,15 +2,31 @@
 name = "intan_importer"
 version = "0.1.0"
 edition = "2024"
-description = "A Rust library for importing Intan data files."
+description = "A Rust library for importing and processing Intan RHS data files for neural recording research"
 authors = ["Jason Brant"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/username/intan_importer"
+documentation = "https://docs.rs/intan_importer"
+keywords = ["neuroscience", "electrophysiology", "intan", "data-analysis", "neural-recording"]
+categories = ["science", "parsing", "data-structures"]
+exclude = [".gitignore", "data/", "*.md", "tests/"]
 
 [dependencies]
 byteorder = "1.5.0"
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["serde"] }
+
+[dev-dependencies]
+criterion = "0.5.1"
 
 [[example]]
 name = "basic_usage"
 path = "examples/basic_usage.rs"
+
+[[bench]]
+name = "read_benchmark"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

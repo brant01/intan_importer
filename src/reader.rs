@@ -1,32 +1,63 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{Array1, Array2, s};
 use std::f64::consts::PI;
-use std::fs::{File, metadata};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Instant;
 
 use crate::types::*;
 
-/// Loads an RHS file and returns a strongly-typed struct representation
+// Constants used throughout the reader
+const RHS_MAGIC_NUMBER: u32 = 0xd69127ac;
+const SAMPLES_PER_DATA_BLOCK: usize = 128;
+const PRINT_PROGRESS_STEP: usize = 10;
+
+// Scaling constants
+const AMPLIFIER_SCALE_FACTOR: f32 = 0.195; // μV per bit
+const DC_AMPLIFIER_SCALE_FACTOR: f32 = -0.01923; // V per bit
+const ADC_DAC_SCALE_FACTOR: f32 = 312.5e-6; // V per bit
+const DC_AMPLIFIER_OFFSET: f32 = 512.0;
+const ADC_DAC_OFFSET: f32 = 32768.0;
+
+/// Loads an RHS file and returns a strongly-typed struct representation.
+///
+/// This function reads and parses an Intan RHS file, extracting both the header
+/// information and the actual recorded data. For large files, this can consume
+/// significant memory.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the RHS file to load
+///
+/// # Returns
+///
+/// A `Result` containing either the loaded `RhsFile` or an error.
+///
+/// # Performance
+///
+/// This function uses buffered I/O for improved reading performance. The parsing
+/// process will report progress for large files.
 pub fn load_file<P: AsRef<Path>>(file_path: P) -> Result<RhsFile, Box<dyn std::error::Error>> {
     // Start timing
     let tic = Instant::now();
 
-    // Open file
-    let mut fid = File::open(file_path.as_ref())?;
+    // Open file with buffered reader for better I/O performance
+    let file = File::open(file_path.as_ref())?;
+    let file_size = file.metadata()?.len();
+    let mut reader = BufReader::with_capacity(65536, file); // 64KB buffer
 
     // Read header
-    let header = read_header(&mut fid)?;
+    let header = read_header(&mut reader)?;
 
     // Calculate how much data is present
-    let (data_present, filesize, num_blocks, num_samples) =
-        calculate_data_size(&header, file_path.as_ref(), &mut fid)?;
+    let (data_present, num_blocks, num_samples) =
+        calculate_data_size(&header, file_size, &mut reader)?;
 
     // Read data if present
     let data = if data_present {
-        let data = read_all_data_blocks(&header, num_samples, num_blocks, &mut fid)?;
-        check_end_of_file(filesize, &mut fid)?;
+        let data = read_all_data_blocks(&header, num_samples, num_blocks, &mut reader)?;
+        check_end_of_file(file_size, &mut reader)?;
 
         // Apply processing to the data
         let data = process_data(&header, data)?;
@@ -50,12 +81,12 @@ pub fn load_file<P: AsRef<Path>>(file_path: P) -> Result<RhsFile, Box<dyn std::e
 }
 
 /// Reads the header from an RHS file
-fn read_header(fid: &mut File) -> Result<RhsHeader, Box<dyn std::error::Error>> {
-    // Create header with default values
+fn read_header<R: Read + Seek>(reader: &mut R) -> Result<RhsHeader, Box<dyn std::error::Error>> {
+    // Create header with default values for RHS format
     let mut header = RhsHeader {
         version: Version { major: 0, minor: 0 },
         sample_rate: 0.0,
-        num_samples_per_data_block: 128, // RHS files always have 128 samples per data block
+        num_samples_per_data_block: SAMPLES_PER_DATA_BLOCK as i32,
         dsp_enabled: 0,
         actual_dsp_cutoff_frequency: 0.0,
         actual_lower_bandwidth: 0.0,
@@ -114,60 +145,60 @@ fn read_header(fid: &mut File) -> Result<RhsHeader, Box<dyn std::error::Error>> 
     };
 
     // Check magic number
-    check_magic_number(fid)?;
+    check_magic_number(reader)?;
 
     // Read version number
-    read_version_number(fid, &mut header)?;
+    read_version_number(reader, &mut header)?;
 
     // Read sample rate
-    header.sample_rate = fid.read_f32::<LittleEndian>()?;
+    header.sample_rate = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.amplifier_sample_rate = header.sample_rate;
     header.frequency_parameters.board_adc_sample_rate = header.sample_rate;
     header.frequency_parameters.board_dig_in_sample_rate = header.sample_rate;
 
     // Read frequency settings
-    read_freq_settings(fid, &mut header)?;
+    read_freq_settings(reader, &mut header)?;
 
     // Read notch filter
-    read_notch_filter_frequency(fid, &mut header)?;
+    read_notch_filter_frequency(reader, &mut header)?;
 
     // Read impedance test frequencies
-    read_impedance_test_frequencies(fid, &mut header)?;
+    read_impedance_test_frequencies(reader, &mut header)?;
 
     // Read amp settle mode
-    header.amp_settle_mode = fid.read_i16::<LittleEndian>()? as i32;
+    header.amp_settle_mode = reader.read_i16::<LittleEndian>()? as i32;
     header.stim_parameters.amp_settle_mode = header.amp_settle_mode;
 
     // Read charge recovery mode
-    header.charge_recovery_mode = fid.read_i16::<LittleEndian>()? as i32;
+    header.charge_recovery_mode = reader.read_i16::<LittleEndian>()? as i32;
     header.stim_parameters.charge_recovery_mode = header.charge_recovery_mode;
 
     // Read stim step size
-    header.stim_step_size = fid.read_f32::<LittleEndian>()?;
+    header.stim_step_size = reader.read_f32::<LittleEndian>()?;
     header.stim_parameters.stim_step_size = header.stim_step_size;
 
     // Read recovery current limit
-    header.recovery_current_limit = fid.read_f32::<LittleEndian>()?;
+    header.recovery_current_limit = reader.read_f32::<LittleEndian>()?;
     header.stim_parameters.charge_recovery_current_limit = header.recovery_current_limit;
 
     // Read recovery target voltage
-    header.recovery_target_voltage = fid.read_f32::<LittleEndian>()?;
+    header.recovery_target_voltage = reader.read_f32::<LittleEndian>()?;
     header.stim_parameters.charge_recovery_target_voltage = header.recovery_target_voltage;
 
     // Read notes
-    read_notes(fid, &mut header)?;
+    read_notes(reader, &mut header)?;
 
     // Read DC amp saved flag
-    header.dc_amplifier_data_saved = fid.read_i16::<LittleEndian>()? != 0;
+    header.dc_amplifier_data_saved = reader.read_i16::<LittleEndian>()? != 0;
 
     // Read eval board mode
-    header.eval_board_mode = fid.read_i16::<LittleEndian>()? as i32;
+    header.eval_board_mode = reader.read_i16::<LittleEndian>()? as i32;
 
     // Read reference channel
-    header.reference_channel = read_qstring(fid)?;
+    header.reference_channel = read_qstring(reader)?;
 
     // Read signal summary
-    read_signal_summary(fid, &mut header)?;
+    read_signal_summary(reader, &mut header)?;
 
     // Print header summary
     print_header_summary(&header);
@@ -175,19 +206,19 @@ fn read_header(fid: &mut File) -> Result<RhsHeader, Box<dyn std::error::Error>> 
     Ok(header)
 }
 
-// Helper function to check the magic number
-fn check_magic_number(fid: &mut File) -> Result<(), IntanError> {
-    let magic_number = fid.read_u32::<LittleEndian>()?;
-    if magic_number != 0xd69127ac {
+/// Helper function to check the magic number that identifies RHS files
+fn check_magic_number<R: Read>(reader: &mut R) -> Result<(), IntanError> {
+    let magic_number = reader.read_u32::<LittleEndian>()?;
+    if magic_number != RHS_MAGIC_NUMBER {
         return Err(IntanError::UnrecognizedFileFormat);
     }
     Ok(())
 }
 
-// Helper function to read the version number
-fn read_version_number(fid: &mut File, header: &mut RhsHeader) -> Result<(), IntanError> {
+/// Helper function to read the version number
+fn read_version_number<R: Read>(reader: &mut R, header: &mut RhsHeader) -> Result<(), IntanError> {
     let mut version_bytes = [0u8; 4];
-    fid.read_exact(&mut version_bytes)?;
+    reader.read_exact(&mut version_bytes)?;
 
     header.version.major = i16::from_le_bytes([version_bytes[0], version_bytes[1]]) as i32;
     header.version.minor = i16::from_le_bytes([version_bytes[2], version_bytes[3]]) as i32;
@@ -200,52 +231,52 @@ fn read_version_number(fid: &mut File, header: &mut RhsHeader) -> Result<(), Int
     Ok(())
 }
 
-// Helper function to read frequency settings
-fn read_freq_settings(fid: &mut File, header: &mut RhsHeader) -> Result<(), IntanError> {
+/// Helper function to read frequency settings
+fn read_freq_settings<R: Read>(reader: &mut R, header: &mut RhsHeader) -> Result<(), IntanError> {
     // Read DSP enabled flag
-    header.dsp_enabled = fid.read_i16::<LittleEndian>()? as i32;
+    header.dsp_enabled = reader.read_i16::<LittleEndian>()? as i32;
     header.frequency_parameters.dsp_enabled = header.dsp_enabled;
 
     // Read actual DSP cutoff frequency
-    header.actual_dsp_cutoff_frequency = fid.read_f32::<LittleEndian>()?;
+    header.actual_dsp_cutoff_frequency = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.actual_dsp_cutoff_frequency = header.actual_dsp_cutoff_frequency;
 
     // Read actual lower bandwidth
-    header.actual_lower_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.actual_lower_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.actual_lower_bandwidth = header.actual_lower_bandwidth;
 
     // Read actual lower settle bandwidth
-    header.actual_lower_settle_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.actual_lower_settle_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.actual_lower_settle_bandwidth =
         header.actual_lower_settle_bandwidth;
 
     // Read actual upper bandwidth
-    header.actual_upper_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.actual_upper_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.actual_upper_bandwidth = header.actual_upper_bandwidth;
 
     // Read desired DSP cutoff frequency
-    header.desired_dsp_cutoff_frequency = fid.read_f32::<LittleEndian>()?;
+    header.desired_dsp_cutoff_frequency = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.desired_dsp_cutoff_frequency = header.desired_dsp_cutoff_frequency;
 
     // Read desired lower bandwidth
-    header.desired_lower_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.desired_lower_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.desired_lower_bandwidth = header.desired_lower_bandwidth;
 
     // Read desired lower settle bandwidth
-    header.desired_lower_settle_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.desired_lower_settle_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.desired_lower_settle_bandwidth =
         header.desired_lower_settle_bandwidth;
 
     // Read desired upper bandwidth
-    header.desired_upper_bandwidth = fid.read_f32::<LittleEndian>()?;
+    header.desired_upper_bandwidth = reader.read_f32::<LittleEndian>()?;
     header.frequency_parameters.desired_upper_bandwidth = header.desired_upper_bandwidth;
 
     Ok(())
 }
 
-// Helper function to read notch filter frequency
-fn read_notch_filter_frequency(fid: &mut File, header: &mut RhsHeader) -> Result<(), IntanError> {
-    let notch_filter_mode = fid.read_i16::<LittleEndian>()? as i32;
+/// Helper function to read notch filter frequency
+fn read_notch_filter_frequency<R: Read>(reader: &mut R, header: &mut RhsHeader) -> Result<(), IntanError> {
+    let notch_filter_mode = reader.read_i16::<LittleEndian>()? as i32;
 
     header.notch_filter_frequency = match notch_filter_mode {
         1 => Some(50),
@@ -258,13 +289,13 @@ fn read_notch_filter_frequency(fid: &mut File, header: &mut RhsHeader) -> Result
     Ok(())
 }
 
-// Helper function to read impedance test frequencies
-fn read_impedance_test_frequencies(
-    fid: &mut File,
+/// Helper function to read impedance test frequencies
+fn read_impedance_test_frequencies<R: Read>(
+    reader: &mut R,
     header: &mut RhsHeader,
 ) -> Result<(), IntanError> {
-    header.desired_impedance_test_frequency = fid.read_f32::<LittleEndian>()?;
-    header.actual_impedance_test_frequency = fid.read_f32::<LittleEndian>()?;
+    header.desired_impedance_test_frequency = reader.read_f32::<LittleEndian>()?;
+    header.actual_impedance_test_frequency = reader.read_f32::<LittleEndian>()?;
 
     header.frequency_parameters.desired_impedance_test_frequency =
         header.desired_impedance_test_frequency;
@@ -274,48 +305,48 @@ fn read_impedance_test_frequencies(
     Ok(())
 }
 
-// Helper function to read notes
-fn read_notes(fid: &mut File, header: &mut RhsHeader) -> Result<(), IntanError> {
-    header.notes.note1 = read_qstring(fid)?;
-    header.notes.note2 = read_qstring(fid)?;
-    header.notes.note3 = read_qstring(fid)?;
+/// Helper function to read notes
+fn read_notes<R: Read + Seek>(reader: &mut R, header: &mut RhsHeader) -> Result<(), IntanError> {
+    header.notes.note1 = read_qstring(reader)?;
+    header.notes.note2 = read_qstring(reader)?;
+    header.notes.note3 = read_qstring(reader)?;
 
     Ok(())
 }
 
-// Helper function to read signal summary
-fn read_signal_summary(fid: &mut File, header: &mut RhsHeader) -> Result<(), IntanError> {
-    let number_of_signal_groups = fid.read_i16::<LittleEndian>()?;
+/// Helper function to read signal summary
+fn read_signal_summary<R: Read + Seek>(reader: &mut R, header: &mut RhsHeader) -> Result<(), IntanError> {
+    let number_of_signal_groups = reader.read_i16::<LittleEndian>()?;
 
     for _ in 1..=number_of_signal_groups {
-        add_signal_group_information(header, fid)?;
+        add_signal_group_information(header, reader)?;
     }
 
     Ok(())
 }
 
-// Helper function to add signal group information
-fn add_signal_group_information(header: &mut RhsHeader, fid: &mut File) -> Result<(), IntanError> {
-    let signal_group_name = read_qstring(fid)?;
-    let signal_group_prefix = read_qstring(fid)?;
+/// Helper function to add signal group information
+fn add_signal_group_information<R: Read + Seek>(header: &mut RhsHeader, reader: &mut R) -> Result<(), IntanError> {
+    let signal_group_name = read_qstring(reader)?;
+    let signal_group_prefix = read_qstring(reader)?;
 
-    let signal_group_enabled = fid.read_i16::<LittleEndian>()?;
-    let signal_group_num_channels = fid.read_i16::<LittleEndian>()?;
-    let _ = fid.read_i16::<LittleEndian>()?; // signal_group_num_channels (unused)
+    let signal_group_enabled = reader.read_i16::<LittleEndian>()?;
+    let signal_group_num_channels = reader.read_i16::<LittleEndian>()?;
+    let _ = reader.read_i16::<LittleEndian>()?; // signal_group_num_channels (unused)
 
     if signal_group_num_channels > 0 && signal_group_enabled > 0 {
         for _ in 0..signal_group_num_channels {
-            add_channel_information(header, fid, &signal_group_name, &signal_group_prefix)?;
+            add_channel_information(header, reader, &signal_group_name, &signal_group_prefix)?;
         }
     }
 
     Ok(())
 }
 
-// Helper function to add channel information
-fn add_channel_information(
+/// Helper function to add channel information
+fn add_channel_information<R: Read + Seek>(
     header: &mut RhsHeader,
-    fid: &mut File,
+    reader: &mut R,
     signal_group_name: &str,
     signal_group_prefix: &str,
 ) -> Result<(), IntanError> {
@@ -343,28 +374,28 @@ fn add_channel_information(
     };
 
     // Read channel information
-    new_channel.native_channel_name = read_qstring(fid)?;
-    new_channel.custom_channel_name = read_qstring(fid)?;
+    new_channel.native_channel_name = read_qstring(reader)?;
+    new_channel.custom_channel_name = read_qstring(reader)?;
 
-    new_channel.native_order = fid.read_i16::<LittleEndian>()? as i32;
-    new_channel.custom_order = fid.read_i16::<LittleEndian>()? as i32;
+    new_channel.native_order = reader.read_i16::<LittleEndian>()? as i32;
+    new_channel.custom_order = reader.read_i16::<LittleEndian>()? as i32;
 
-    let signal_type = fid.read_i16::<LittleEndian>()? as i32;
-    let channel_enabled = fid.read_i16::<LittleEndian>()? as i32;
+    let signal_type = reader.read_i16::<LittleEndian>()? as i32;
+    let channel_enabled = reader.read_i16::<LittleEndian>()? as i32;
 
-    new_channel.chip_channel = fid.read_i16::<LittleEndian>()? as i32;
-    let _ = fid.read_i16::<LittleEndian>()?; // reserved
-    new_channel.board_stream = fid.read_i16::<LittleEndian>()? as i32;
+    new_channel.chip_channel = reader.read_i16::<LittleEndian>()? as i32;
+    let _ = reader.read_i16::<LittleEndian>()?; // reserved
+    new_channel.board_stream = reader.read_i16::<LittleEndian>()? as i32;
 
     // Read trigger information
-    new_trigger.voltage_trigger_mode = fid.read_i16::<LittleEndian>()? as i32;
-    new_trigger.voltage_threshold = fid.read_i16::<LittleEndian>()? as i32;
-    new_trigger.digital_trigger_channel = fid.read_i16::<LittleEndian>()? as i32;
-    new_trigger.digital_edge_polarity = fid.read_i16::<LittleEndian>()? as i32;
+    new_trigger.voltage_trigger_mode = reader.read_i16::<LittleEndian>()? as i32;
+    new_trigger.voltage_threshold = reader.read_i16::<LittleEndian>()? as i32;
+    new_trigger.digital_trigger_channel = reader.read_i16::<LittleEndian>()? as i32;
+    new_trigger.digital_edge_polarity = reader.read_i16::<LittleEndian>()? as i32;
 
     // Read impedance information
-    new_channel.electrode_impedance_magnitude = fid.read_f32::<LittleEndian>()?;
-    new_channel.electrode_impedance_phase = fid.read_f32::<LittleEndian>()?;
+    new_channel.electrode_impedance_magnitude = reader.read_f32::<LittleEndian>()?;
+    new_channel.electrode_impedance_phase = reader.read_f32::<LittleEndian>()?;
 
     // If channel is enabled, add it to the appropriate list
     if channel_enabled == 0 {
@@ -455,18 +486,22 @@ fn print_header_summary(header: &RhsHeader) {
     println!();
 }
 
-// Helper function to read a QString (UTF-16 encoded string)
-fn read_qstring(fid: &mut File) -> Result<String, IntanError> {
-    let length = fid.read_u32::<LittleEndian>()?;
+/// Helper function to read a QString (UTF-16 encoded string)
+///
+/// QtStrings in RHS files are stored as UTF-16 with a 4-byte length prefix.
+/// A special value of 0xFFFFFFFF indicates an empty string.
+fn read_qstring<R: Read + Seek>(reader: &mut R) -> Result<String, IntanError> {
+    let length = reader.read_u32::<LittleEndian>()?;
 
     // If length set to 0xFFFFFFFF, return empty string
     if length == 0xFFFFFFFF {
         return Ok(String::new());
     }
 
-    let current_position = fid.stream_position()?;
-    let file_length = fid.seek(SeekFrom::End(0))?;
-    fid.seek(SeekFrom::Start(current_position))?;
+    // Verify that the string length is reasonable given remaining file size
+    let current_position = reader.stream_position()?;
+    let file_length = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(current_position))?;
 
     if length as u64 > file_length - current_position + 1 {
         return Err(IntanError::StringReadError);
@@ -475,13 +510,15 @@ fn read_qstring(fid: &mut File) -> Result<String, IntanError> {
     // Convert length from bytes to 16-bit Unicode words
     let length = (length as usize) / 2;
 
-    let mut data = Vec::new();
+    // Preallocate for performance
+    let mut data = Vec::with_capacity(length);
     for _ in 0..length {
-        let c = fid.read_u16::<LittleEndian>()?;
+        let c = reader.read_u16::<LittleEndian>()?;
         data.push(c);
     }
 
-    let mut result = String::new();
+    // Create string from UTF-16 characters
+    let mut result = String::with_capacity(length);
     for &c in &data {
         match char::from_u32(c as u32) {
             Some(ch) => result.push(ch),
@@ -492,19 +529,30 @@ fn read_qstring(fid: &mut File) -> Result<String, IntanError> {
     Ok(result)
 }
 
-// Helper function to calculate data size
-fn calculate_data_size<P: AsRef<Path>>(
+/// Calculates how much data is present in the file and returns relevant metrics
+///
+/// # Arguments
+///
+/// * `header` - The parsed header information
+/// * `file_size` - The total size of the file in bytes
+/// * `reader` - The file reader, positioned after the header
+///
+/// # Returns
+///
+/// Tuple containing:
+/// * `data_present` - Boolean indicating if any data blocks are present
+/// * `num_blocks` - Number of data blocks in the file
+/// * `num_samples` - Total number of samples in the file
+fn calculate_data_size<R: Read + Seek>(
     header: &RhsHeader,
-    file_path: P,
-    fid: &mut File,
-) -> Result<(bool, u64, u64, u64), Box<dyn std::error::Error>> {
+    file_size: u64,
+    reader: &mut R,
+) -> Result<(bool, u64, u64), Box<dyn std::error::Error>> {
     let bytes_per_block = get_bytes_per_data_block(header)?;
 
-    // Determine filesize and if any data is present
-    let metadata = metadata(file_path)?;
-    let filesize = metadata.len();
-    
-    let bytes_remaining = filesize - fid.stream_position()?;
+    // Calculate how many bytes remain in the file after the header
+    let current_position = reader.stream_position()?;
+    let bytes_remaining = file_size - current_position;
 
     let data_present = bytes_remaining > 0;
 
@@ -520,7 +568,7 @@ fn calculate_data_size<P: AsRef<Path>>(
 
     print_record_time_summary(num_samples, header.sample_rate, data_present);
 
-    Ok((data_present, filesize, num_blocks, num_samples))
+    Ok((data_present, num_blocks, num_samples))
 }
 
 // Helper function to print record time summary
@@ -620,12 +668,14 @@ struct RawData {
     board_dig_out_raw: Option<Array2<i32>>,
 }
 
-// Helper function to read all data blocks
-fn read_all_data_blocks(
+/// Helper function to read all data blocks
+///
+/// This function reads all data blocks from the file into memory, organized by channel type.
+fn read_all_data_blocks<R: Read + Seek>(
     header: &RhsHeader,
     num_samples: u64,
     num_blocks: u64,
-    fid: &mut File,
+    reader: &mut R,
 ) -> Result<RawData, Box<dyn std::error::Error>> {
     println!("Reading data from file...");
 
@@ -693,13 +743,13 @@ fn read_all_data_blocks(
     };
 
     // Read each data block
-    let print_step = 10;
+    let print_step = PRINT_PROGRESS_STEP;
     let mut percent_done = print_step;
     let num_blocks = num_blocks as usize;
 
     for i in 0..num_blocks {
-        let index = i * header.num_samples_per_data_block as usize;
-        read_one_data_block(&mut raw_data, header, index, fid)?;
+        let index = i * SAMPLES_PER_DATA_BLOCK;
+        read_one_data_block(&mut raw_data, header, index, reader)?;
 
         // Print progress
         let progress = (i as f64 / num_blocks as f64) * 100.0;
@@ -712,30 +762,35 @@ fn read_all_data_blocks(
     Ok(raw_data)
 }
 
-// Helper function to read one data block
-fn read_one_data_block(
+/// Helper function to read one data block
+///
+/// Reads a single block of data from the file, including timestamps, 
+/// analog signals, and digital signals.
+fn read_one_data_block<R: Read + Seek>(
     data: &mut RawData,
     header: &RhsHeader,
     index: usize,
-    fid: &mut File,
+    reader: &mut R,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let samples_per_block = header.num_samples_per_data_block as usize;
+    let samples_per_block = SAMPLES_PER_DATA_BLOCK;
 
     // Read timestamps
-    read_timestamps(fid, &mut data.timestamps, index, samples_per_block)?;
+    read_timestamps(reader, &mut data.timestamps, index, samples_per_block)?;
 
     // Read analog signals
-    read_analog_signals(fid, data, header, index, samples_per_block)?;
+    read_analog_signals(reader, data, header, index, samples_per_block)?;
 
     // Read digital signals
-    read_digital_signals(fid, data, header, index, samples_per_block)?;
+    read_digital_signals(reader, data, header, index, samples_per_block)?;
 
     Ok(())
 }
 
-// Helper function to read timestamps
-fn read_timestamps(
-    fid: &mut File,
+/// Helper function to read timestamps
+/// 
+/// Reads a block of timestamp values from the file into the timestamps array.
+fn read_timestamps<R: Read>(
+    reader: &mut R,
     timestamps: &mut Array1<i32>,
     index: usize,
     num_samples: usize,
@@ -743,11 +798,13 @@ fn read_timestamps(
     let start = index;
     let end = start + num_samples;
 
+    // Read all timestamp bytes in one operation for better performance
     let mut buffer = vec![0u8; num_samples * 4];
-    fid.read_exact(&mut buffer)?;
+    reader.read_exact(&mut buffer)?;
 
     let mut timestamps_slice = timestamps.slice_mut(s![start..end]);
 
+    // Parse bytes into i32 values
     for i in 0..num_samples {
         let ts = i32::from_le_bytes([
             buffer[i * 4],
@@ -761,9 +818,11 @@ fn read_timestamps(
     Ok(())
 }
 
-// Helper function to read analog signals
-fn read_analog_signals(
-    fid: &mut File,
+/// Helper function to read analog signals
+/// 
+/// Reads all analog signal types (amplifier, DC amplifier, stim, ADC, DAC) from a data block.
+fn read_analog_signals<R: Read>(
+    reader: &mut R,
     data: &mut RawData,
     header: &RhsHeader,
     index: usize,
@@ -775,7 +834,7 @@ fn read_analog_signals(
     if num_amplifier_channels > 0 {
         if let Some(ref mut amp_data) = data.amplifier_data_raw {
             read_analog_signal_type(
-                fid,
+                reader,
                 amp_data,
                 index,
                 samples_per_block,
@@ -788,7 +847,7 @@ fn read_analog_signals(
     if num_amplifier_channels > 0 && header.dc_amplifier_data_saved {
         if let Some(ref mut dc_amp_data) = data.dc_amplifier_data_raw {
             read_analog_signal_type(
-                fid,
+                reader,
                 dc_amp_data,
                 index,
                 samples_per_block,
@@ -801,7 +860,7 @@ fn read_analog_signals(
     if num_amplifier_channels > 0 {
         if let Some(ref mut stim_data) = data.stim_data_raw {
             read_analog_signal_type(
-                fid,
+                reader,
                 stim_data,
                 index,
                 samples_per_block,
@@ -815,7 +874,7 @@ fn read_analog_signals(
     if num_board_adc_channels > 0 {
         if let Some(ref mut adc_data) = data.board_adc_data_raw {
             read_analog_signal_type(
-                fid,
+                reader,
                 adc_data,
                 index,
                 samples_per_block,
@@ -829,7 +888,7 @@ fn read_analog_signals(
     if num_board_dac_channels > 0 {
         if let Some(ref mut dac_data) = data.board_dac_data_raw {
             read_analog_signal_type(
-                fid,
+                reader,
                 dac_data,
                 index,
                 samples_per_block,
@@ -841,9 +900,11 @@ fn read_analog_signals(
     Ok(())
 }
 
-// Helper function to read analog signal type
-fn read_analog_signal_type(
-    fid: &mut File,
+/// Helper function to read an analog signal type
+///
+/// Reads a block of analog samples for multiple channels and stores them in the destination array.
+fn read_analog_signal_type<R: Read>(
+    reader: &mut R,
     dest: &mut Array2<i32>,
     start: usize,
     num_samples: usize,
@@ -855,11 +916,13 @@ fn read_analog_signal_type(
 
     let end = start + num_samples;
 
+    // Read all channel data in one operation
     let mut buffer = vec![0u8; num_samples * num_channels * 2];
-    fid.read_exact(&mut buffer)?;
+    reader.read_exact(&mut buffer)?;
 
     let mut t_slice = dest.slice_mut(s![.., start..end]);
 
+    // Parse bytes into i16 values and store in the appropriate channel/sample position
     for ch in 0..num_channels {
         for s in 0..num_samples {
             let idx = 2 * (s * num_channels + ch);
@@ -871,9 +934,11 @@ fn read_analog_signal_type(
     Ok(())
 }
 
-// Helper function to read digital signals
-fn read_digital_signals(
-    fid: &mut File,
+/// Helper function to read digital signals
+///
+/// Reads both digital input and output signals from a data block.
+fn read_digital_signals<R: Read>(
+    reader: &mut R,
     data: &mut RawData,
     header: &RhsHeader,
     index: usize,
@@ -882,21 +947,24 @@ fn read_digital_signals(
     // Read digital input data
     let num_board_dig_in_channels = header.board_dig_in_channels.len();
     if num_board_dig_in_channels > 0 {
-        read_digital_signal_type(fid, &mut data.board_dig_in_raw, index, samples_per_block)?;
+        read_digital_signal_type(reader, &mut data.board_dig_in_raw, index, samples_per_block)?;
     }
 
     // Read digital output data
     let num_board_dig_out_channels = header.board_dig_out_channels.len();
     if num_board_dig_out_channels > 0 {
-        read_digital_signal_type(fid, &mut data.board_dig_out_raw, index, samples_per_block)?;
+        read_digital_signal_type(reader, &mut data.board_dig_out_raw, index, samples_per_block)?;
     }
 
     Ok(())
 }
 
-// Helper function to read digital signal type
-fn read_digital_signal_type(
-    fid: &mut File,
+/// Helper function to read a digital signal type
+///
+/// Reads a block of digital samples for multiple channels and stores them in the destination array.
+/// For digital signals, the same value is copied to all channels since they share the same data word.
+fn read_digital_signal_type<R: Read>(
+    reader: &mut R,
     dest: &mut Option<Array2<i32>>,
     start: usize,
     num_samples: usize,
@@ -909,11 +977,13 @@ fn read_digital_signal_type(
 
         let end = start + num_samples;
 
+        // Read all digital data in one operation
         let mut buffer = vec![0u8; num_samples * 2];
-        fid.read_exact(&mut buffer)?;
+        reader.read_exact(&mut buffer)?;
 
         let mut t_slice = dest_array.slice_mut(s![.., start..end]);
 
+        // For each sample, duplicate the value across all channels
         for s in 0..num_samples {
             let value = u16::from_le_bytes([buffer[s * 2], buffer[s * 2 + 1]]) as i32;
 
@@ -926,9 +996,12 @@ fn read_digital_signal_type(
     Ok(())
 }
 
-// Helper function to check end of file
-fn check_end_of_file(filesize: u64, fid: &mut File) -> Result<(), Box<dyn std::error::Error>> {
-    let current_position = fid.stream_position()?;
+/// Helper function to check end of file
+///
+/// Verifies that we've reached the end of the file after reading all data.
+/// If there are bytes remaining, there's a problem with our understanding of the file format.
+fn check_end_of_file<R: Read + Seek>(filesize: u64, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    let current_position = reader.stream_position()?;
     let bytes_remaining = filesize - current_position;
 
     if bytes_remaining != 0 {
@@ -1047,28 +1120,36 @@ fn scale_timestamps(header: &RhsHeader, timestamps: &mut Array1<i32>) {
     *timestamps = timestamps.mapv(|x| (x as f32 / header.sample_rate) as i32);
 }
 
-// Helper function to scale amplifier data
+/// Scales amplifier data from raw ADC values to microvolts
+///
+/// Uses the scaling factor of 0.195 μV/bit with an offset of 32768
 fn scale_amplifier_data(data: &mut Array2<i32>) {
     // Scale amplifier data (units = microVolts)
-    *data = data.mapv(|x| (0.195 * (x as f32 - 32768.0)) as i32);
+    *data = data.mapv(|x| (AMPLIFIER_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
 }
 
-// Helper function to scale DC amplifier data
+/// Scales DC amplifier data from raw ADC values to volts
+///
+/// Uses the scaling factor of -0.01923 V/bit with an offset of 512
 fn scale_dc_amplifier_data(data: &mut Array2<i32>) {
     // Scale DC amplifier data (units = Volts)
-    *data = data.mapv(|x| (-0.01923 * (x as f32 - 512.0)) as i32);
+    *data = data.mapv(|x| (DC_AMPLIFIER_SCALE_FACTOR * (x as f32 - DC_AMPLIFIER_OFFSET)) as i32);
 }
 
-// Helper function to scale ADC data
+/// Scales ADC data from raw ADC values to volts
+///
+/// Uses the scaling factor of 312.5 μV/bit with an offset of 32768
 fn scale_adc_data(data: &mut Array2<i32>) {
     // Scale board ADC data (units = Volts)
-    *data = data.mapv(|x| (312.5e-6 * (x as f32 - 32768.0)) as i32);
+    *data = data.mapv(|x| (ADC_DAC_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
 }
 
-// Helper function to scale DAC data
+/// Scales DAC data from raw DAC values to volts
+///
+/// Uses the scaling factor of 312.5 μV/bit with an offset of 32768
 fn scale_dac_data(data: &mut Array2<i32>) {
     // Scale board DAC data (units = Volts)
-    *data = data.mapv(|x| (312.5e-6 * (x as f32 - 32768.0)) as i32);
+    *data = data.mapv(|x| (ADC_DAC_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
 }
 
 // Helper function to extract stim data
