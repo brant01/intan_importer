@@ -1397,7 +1397,7 @@ fn combine_data(combined: &mut RhsFile, next: RhsFile) -> Result<(), Box<dyn std
     
     if let (Some(combined_data), Some(next_data)) = (combined.data.as_mut(), next.data) {
         let last_timestamp = combined_data.timestamps[combined_data.timestamps.len() - 1];
-        let time_offset = last_timestamp + (1.0 / combined.header.sample_rate) as i32;
+        let time_offset = last_timestamp + 1;  // Simply the next sample number
         
         // Adjust timestamps in the next file to continue from the combined file
         let adjusted_timestamps = next_data.timestamps.mapv(|t| t + time_offset);
