@@ -27,8 +27,13 @@ fn main() {
             }
             
             if let Some(data) = &file.data {
+                // Add timestamp checking here
+                println!("\n  Checking timestamps:");
+                println!("    First 5: {:?}", &data.timestamps.as_slice().unwrap()[..5]);
+                println!("    Last 5: {:?}", &data.timestamps.as_slice().unwrap()[data.timestamps.len()-5..]);
+                
                 if let Some(amp_data) = &data.amplifier_data {
-                    println!("  Data shape: {} channels × {} samples", 
+                    println!("\n  Data shape: {} channels × {} samples", 
                              amp_data.shape()[0], amp_data.shape()[1]);
                 }
             }
