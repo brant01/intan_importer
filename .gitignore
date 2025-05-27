@@ -2,4 +2,5 @@
 /Cargo.lock
 /data/
 /tests/
-*.rhs.DS_Store
+*.rhs
+.DS_Store

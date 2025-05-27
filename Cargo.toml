@@ -13,8 +13,9 @@ categories = ["science", "parsing", "data-structures"]
 
 exclude = [
     ".gitignore", 
-    "data/", 
-    "tests/",
+    ".DS_Store",
+    "data/",
+    "tests/", 
     "*.rhs",
     ".git/",
     ".github/",
