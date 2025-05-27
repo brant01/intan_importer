@@ -281,6 +281,8 @@ pub struct RhsData {
     pub board_dig_out_data: Option<Array2<i32>>,
 }
 
+// Add this field to the RhsFile struct in types.rs (around line 279)
+
 /// Complete representation of an RHS file, including header and data.
 ///
 /// This is the top-level struct returned by the `load` function. It contains
@@ -317,6 +319,8 @@ pub struct RhsFile {
     pub data: Option<RhsData>,
     /// Flag indicating whether data is present in the file
     pub data_present: bool,
+    /// List of source files if this was created by combining multiple files
+    pub source_files: Option<Vec<String>>,
 }
 
 impl RhsFile {

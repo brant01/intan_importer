@@ -12,6 +12,7 @@ This library provides tools to read and process these files, making the data acc
 
 ## Main Features
 
+- **Single File or Directory Loading**: Load individual RHS files or automatically combine multiple files from a directory
 - **Comprehensive Parsing**: Read and parse Intan RHS files with full support for all sections
 - **Strong Typing**: All data structures are strongly typed with appropriate Rust types
 - **Automatic Processing**: 
@@ -28,8 +29,11 @@ This library provides tools to read and process these files, making the data acc
 ```rust
 use intan_importer::load;
 
-// Load RHS file
+// Load single RHS file
 let result = load("path/to/your/file.rhs");
+
+// Or load all RHS files from a directory
+let result = load("path/to/recording/directory");
 
 match result {
     Ok(rhs_file) => {
@@ -73,19 +77,23 @@ pub mod types;
 
 use std::error::Error;
 use std::path::Path;
+use std::fs;
 
 // Re-export types
 pub use types::*;
 
-/// Loads an RHS file and returns a struct representation with header information and data.
+/// Loads RHS data from a file or directory.
 ///
-/// This function reads the entire file, including both header information and recorded data.
-/// For large files, this can require significant memory. The returned `RhsFile` struct contains
-/// all information from the file in a strongly-typed representation.
+/// This function can handle two input types:
+/// 1. **Single file**: Loads a single RHS file
+/// 2. **Directory**: Loads and combines all RHS files in the directory
+///
+/// When loading from a directory, all RHS files are combined chronologically into
+/// a single dataset. Files must have compatible headers (same channels, sample rates, etc.).
 ///
 /// # Parameters
 ///
-/// * `file_path` - Path to the RHS file to load
+/// * `path` - Path to an RHS file or a directory containing RHS files
 ///
 /// # Returns
 ///
@@ -93,36 +101,85 @@ pub use types::*;
 ///
 /// # Examples
 ///
+/// ## Loading a single file
 /// ```no_run
 /// use intan_importer::load;
 ///
-/// // Load an RHS file
-/// let result = load("path/to/your/file.rhs");
-/// 
+/// let result = load("recording.rhs");
 /// match result {
 ///     Ok(rhs_file) => {
-///         // Print basic information
-///         println!("Sample rate: {} Hz", rhs_file.header.sample_rate);
-///         println!("Channels: {}", rhs_file.header.amplifier_channels.len());
-///         
-///         // Access recording data if present
-///         if rhs_file.data_present {
-///             if let Some(data) = &rhs_file.data {
-///                 // Example: Calculate recording duration
-///                 let num_samples = data.timestamps.len();
-///                 let duration = num_samples as f32 / rhs_file.header.sample_rate;
-///                 println!("Recording duration: {:.2} seconds", duration);
-///             }
-///         }
+///         println!("Loaded {} seconds of data", rhs_file.duration());
 ///     },
-///     Err(e) => println!("Error loading file: {}", e),
+///     Err(e) => println!("Error: {}", e),
+/// }
+/// ```
+///
+/// ## Loading from a directory
+/// ```no_run
+/// use intan_importer::load;
+///
+/// // Load all RHS files from a recording session split across multiple files
+/// let result = load("recording_session/");
+/// match result {
+///     Ok(rhs_file) => {
+///         println!("Combined {} files", rhs_file.source_files.as_ref().unwrap().len());
+///         println!("Total duration: {} seconds", rhs_file.duration());
+///     },
+///     Err(e) => println!("Error: {}", e),
 /// }
 /// ```
 ///
 /// # Performance Considerations
 ///
-/// For large files, the entire dataset is loaded into memory. Be aware of memory usage
-/// when dealing with lengthy recordings.
-pub fn load<P: AsRef<Path>>(file_path: P) -> Result<RhsFile, Box<dyn Error>> {
-    reader::load_file(file_path)
+/// When loading multiple files, the entire combined dataset is loaded into memory.
+/// Be aware of memory usage when dealing with lengthy recording sessions.
+pub fn load<P: AsRef<Path>>(path: P) -> Result<RhsFile, Box<dyn Error>> {
+    let path = path.as_ref();
+    
+    if path.is_file() {
+        // Load single file
+        reader::load_file(path)
+    } else if path.is_dir() {
+        // Load and combine all RHS files in directory
+        load_directory(path)
+    } else {
+        Err(Box::new(IntanError::Other(format!(
+            "Path '{}' is neither a file nor a directory",
+            path.display()
+        ))))
+    }
+}
+
+/// Loads and combines all RHS files from a directory
+fn load_directory<P: AsRef<Path>>(dir_path: P) -> Result<RhsFile, Box<dyn Error>> {
+    let dir_path = dir_path.as_ref();
+    
+    // Find all .rhs files in the directory
+    let mut rhs_files: Vec<_> = fs::read_dir(dir_path)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.path().extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("rhs"))
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    
+    if rhs_files.is_empty() {
+        return Err(Box::new(IntanError::Other(
+            "No RHS files found in directory".to_string()
+        )));
+    }
+    
+    // Sort files by name to ensure consistent ordering
+    rhs_files.sort();
+    
+    println!("Found {} RHS files to combine:", rhs_files.len());
+    for file in &rhs_files {
+        println!("  - {}", file.display());
+    }
+    
+    // Load and combine the files
+    reader::load_and_combine_files(&rhs_files)
 }

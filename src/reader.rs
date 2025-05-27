@@ -77,6 +77,7 @@ pub fn load_file<P: AsRef<Path>>(file_path: P) -> Result<RhsFile, Box<dyn std::e
         header,
         data,
         data_present,
+        source_files: None,  // Add this line
     })
 }
 
@@ -1300,4 +1301,173 @@ fn notch_filter(signal_in: &[f64], f_sample: f32, f_notch: f32, bandwidth: i32) 
     }
 
     signal_out
+}
+
+
+// Add these functions to the end of reader.rs
+
+/// Loads and combines multiple RHS files into a single dataset
+pub fn load_and_combine_files(file_paths: &[std::path::PathBuf]) -> Result<RhsFile, Box<dyn std::error::Error>> {
+    
+    if file_paths.is_empty() {
+        return Err(Box::new(IntanError::Other("No files to load".to_string())));
+    }
+    
+    // Load the first file
+    println!("\nLoading file 1/{}: {}", file_paths.len(), file_paths[0].display());
+    let mut combined_file = load_file(&file_paths[0])?;
+    
+    if file_paths.len() == 1 {
+        return Ok(combined_file);
+    }
+    
+    // Track source files
+    combined_file.source_files = Some(vec![file_paths[0].to_string_lossy().to_string()]);
+    
+    // Load and combine remaining files
+    for (i, file_path) in file_paths[1..].iter().enumerate() {
+        println!("\nLoading file {}/{}: {}", i + 2, file_paths.len(), file_path.display());
+        let next_file = load_file(file_path)?;
+        
+        // Verify headers are compatible
+        verify_header_compatibility(&combined_file.header, &next_file.header)?;
+        
+        // Combine the data
+        if combined_file.data_present && next_file.data_present {
+            combine_data(&mut combined_file, next_file)?;
+        }
+        
+        // Add to source files list
+        if let Some(ref mut sources) = combined_file.source_files {
+            sources.push(file_path.to_string_lossy().to_string());
+        }
+    }
+    
+    println!("\nSuccessfully combined {} files", file_paths.len());
+    println!("Total duration: {:.2} seconds", combined_file.duration());
+    
+    Ok(combined_file)
+}
+
+/// Verifies that two headers are compatible for combining data
+fn verify_header_compatibility(header1: &RhsHeader, header2: &RhsHeader) -> Result<(), Box<dyn std::error::Error>> {
+    // Check sample rate
+    if (header1.sample_rate - header2.sample_rate).abs() > 0.01 {
+        return Err(Box::new(IntanError::Other(format!(
+            "Sample rates don't match: {} Hz vs {} Hz",
+            header1.sample_rate, header2.sample_rate
+        ))));
+    }
+    
+    // Check number of channels
+    if header1.amplifier_channels.len() != header2.amplifier_channels.len() {
+        return Err(Box::new(IntanError::Other(format!(
+            "Number of amplifier channels don't match: {} vs {}",
+            header1.amplifier_channels.len(), header2.amplifier_channels.len()
+        ))));
+    }
+    
+    if header1.board_adc_channels.len() != header2.board_adc_channels.len() {
+        return Err(Box::new(IntanError::Other(format!(
+            "Number of board ADC channels don't match: {} vs {}",
+            header1.board_adc_channels.len(), header2.board_adc_channels.len()
+        ))));
+    }
+    
+    if header1.board_dig_in_channels.len() != header2.board_dig_in_channels.len() {
+        return Err(Box::new(IntanError::Other(format!(
+            "Number of digital input channels don't match: {} vs {}",
+            header1.board_dig_in_channels.len(), header2.board_dig_in_channels.len()
+        ))));
+    }
+    
+    // Verify channel names match
+    for (i, (ch1, ch2)) in header1.amplifier_channels.iter().zip(&header2.amplifier_channels).enumerate() {
+        if ch1.native_channel_name != ch2.native_channel_name {
+            return Err(Box::new(IntanError::Other(format!(
+                "Amplifier channel {} names don't match: '{}' vs '{}'",
+                i, ch1.native_channel_name, ch2.native_channel_name
+            ))));
+        }
+    }
+    
+    Ok(())
+}
+
+/// Combines data from two RHS files
+fn combine_data(combined: &mut RhsFile, next: RhsFile) -> Result<(), Box<dyn std::error::Error>> {
+    use ndarray::{Axis, concatenate};
+    
+    if let (Some(combined_data), Some(next_data)) = (combined.data.as_mut(), next.data) {
+        let last_timestamp = combined_data.timestamps[combined_data.timestamps.len() - 1];
+        let time_offset = last_timestamp + (1.0 / combined.header.sample_rate) as i32;
+        
+        // Adjust timestamps in the next file to continue from the combined file
+        let adjusted_timestamps = next_data.timestamps.mapv(|t| t + time_offset);
+        
+        // Concatenate timestamps
+        combined_data.timestamps = concatenate![Axis(0), combined_data.timestamps.view(), adjusted_timestamps.view()];
+        
+        // Concatenate amplifier data
+        if let (Some(combined_amp), Some(next_amp)) = 
+            (&mut combined_data.amplifier_data, next_data.amplifier_data) {
+            *combined_amp = concatenate![Axis(1), combined_amp.view(), next_amp.view()];
+        }
+        
+        // Concatenate DC amplifier data
+        if let (Some(combined_dc), Some(next_dc)) = 
+            (&mut combined_data.dc_amplifier_data, next_data.dc_amplifier_data) {
+            *combined_dc = concatenate![Axis(1), combined_dc.view(), next_dc.view()];
+        }
+        
+        // Concatenate stim data
+        if let (Some(combined_stim), Some(next_stim)) = 
+            (&mut combined_data.stim_data, next_data.stim_data) {
+            *combined_stim = concatenate![Axis(1), combined_stim.view(), next_stim.view()];
+        }
+        
+        // Concatenate compliance limit data
+        if let (Some(combined_comp), Some(next_comp)) = 
+            (&mut combined_data.compliance_limit_data, next_data.compliance_limit_data) {
+            *combined_comp = concatenate![Axis(1), combined_comp.view(), next_comp.view()];
+        }
+        
+        // Concatenate charge recovery data
+        if let (Some(combined_charge), Some(next_charge)) = 
+            (&mut combined_data.charge_recovery_data, next_data.charge_recovery_data) {
+            *combined_charge = concatenate![Axis(1), combined_charge.view(), next_charge.view()];
+        }
+        
+        // Concatenate amp settle data
+        if let (Some(combined_settle), Some(next_settle)) = 
+            (&mut combined_data.amp_settle_data, next_data.amp_settle_data) {
+            *combined_settle = concatenate![Axis(1), combined_settle.view(), next_settle.view()];
+        }
+        
+        // Concatenate board ADC data
+        if let (Some(combined_adc), Some(next_adc)) = 
+            (&mut combined_data.board_adc_data, next_data.board_adc_data) {
+            *combined_adc = concatenate![Axis(1), combined_adc.view(), next_adc.view()];
+        }
+        
+        // Concatenate board DAC data
+        if let (Some(combined_dac), Some(next_dac)) = 
+            (&mut combined_data.board_dac_data, next_data.board_dac_data) {
+            *combined_dac = concatenate![Axis(1), combined_dac.view(), next_dac.view()];
+        }
+        
+        // Concatenate digital input data
+        if let (Some(combined_din), Some(next_din)) = 
+            (&mut combined_data.board_dig_in_data, next_data.board_dig_in_data) {
+            *combined_din = concatenate![Axis(1), combined_din.view(), next_din.view()];
+        }
+        
+        // Concatenate digital output data
+        if let (Some(combined_dout), Some(next_dout)) = 
+            (&mut combined_data.board_dig_out_data, next_data.board_dig_out_data) {
+            *combined_dout = concatenate![Axis(1), combined_dout.view(), next_dout.view()];
+        }
+    }
+    
+    Ok(())
 }

@@ -1,16 +1,26 @@
 [package]
 name = "intan_importer"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition = "2021"
 description = "A Rust library for importing and processing Intan RHS data files for neural recording research"
-authors = ["Jason Brant"]
+authors = ["JB"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/brant01/intan_importer.git"
 documentation = "https://docs.rs/intan_importer"
 keywords = ["neuroscience", "electrophysiology", "intan", "data-analysis", "neural-recording"]
 categories = ["science", "parsing", "data-structures"]
-exclude = [".gitignore", "data/", "*.md", "tests/"]
+
+exclude = [
+    ".gitignore", 
+    "data/", 
+    "tests/",
+    "*.rhs",
+    ".git/",
+    ".github/",
+    "target/",
+    "Cargo.lock"
+]
 
 [dependencies]
 byteorder = "1.5.0"
