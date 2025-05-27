@@ -1325,6 +1325,7 @@ pub fn load_and_combine_files(file_paths: &[std::path::PathBuf]) -> Result<RhsFi
     for (i, file_path) in file_paths[1..].iter().enumerate() {
         println!("\nLoading file {}/{}: {}", i + 2, file_paths.len(), file_path.display());
         let next_file = load_file(file_path)?;
+
         
         // Verify headers are compatible
         verify_header_compatibility(&combined_file.header, &next_file.header)?;
@@ -1345,7 +1346,6 @@ pub fn load_and_combine_files(file_paths: &[std::path::PathBuf]) -> Result<RhsFi
     
     Ok(combined_file)
 }
-
 /// Verifies that two headers are compatible for combining data
 fn verify_header_compatibility(header1: &RhsHeader, header2: &RhsHeader) -> Result<(), Box<dyn std::error::Error>> {
     // Check sample rate
@@ -1396,14 +1396,9 @@ fn combine_data(combined: &mut RhsFile, next: RhsFile) -> Result<(), Box<dyn std
     use ndarray::{Axis, concatenate};
     
     if let (Some(combined_data), Some(next_data)) = (combined.data.as_mut(), next.data) {
-        let last_timestamp = combined_data.timestamps[combined_data.timestamps.len() - 1];
-        let time_offset = last_timestamp + 1;  // Simply the next sample number
-        
-        // Adjust timestamps in the next file to continue from the combined file
-        let adjusted_timestamps = next_data.timestamps.mapv(|t| t + time_offset);
-        
-        // Concatenate timestamps
-        combined_data.timestamps = concatenate![Axis(0), combined_data.timestamps.view(), adjusted_timestamps.view()];
+ 
+        // Concatenate timestamps without adjustment, already saved with correct number between files
+        combined_data.timestamps = concatenate![Axis(0), combined_data.timestamps.view(), next_data.timestamps.view()];
         
         // Concatenate amplifier data
         if let (Some(combined_amp), Some(next_amp)) = 
