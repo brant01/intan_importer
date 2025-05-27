@@ -241,7 +241,7 @@ pub struct RhsHeader {
 /// and the second dimension is the time sample.
 #[derive(Debug, Clone)]
 pub struct RhsData {
-    /// Timestamps for each sample (in samples, convert to seconds by dividing by sample_rate)
+    /// Timestamps for each sample (in sample numbers - divide by sample_rate to get seconds)
     pub timestamps: Array1<i32>,
     /// Neural data from amplifier channels (μV)
     /// - Shape: [num_channels, num_samples]

@@ -1035,7 +1035,7 @@ fn process_data(
     };
 
     // Scale timestamps
-    scale_timestamps(header, &mut data.timestamps);
+    check_timestamps(&data.timestamps);
 
     // Process amplifier data
     if let Some(amp_data_raw) = raw_data.amplifier_data_raw {
@@ -1100,7 +1100,7 @@ fn process_data(
 }
 
 // Helper function to scale timestamps
-fn scale_timestamps(header: &RhsHeader, timestamps: &mut Array1<i32>) {
+fn check_timestamps(timestamps: &Array1<i32>) {
     // Check for gaps in timestamps
     let num_gaps = timestamps
         .windows(2)
@@ -1116,9 +1116,6 @@ fn scale_timestamps(header: &RhsHeader, timestamps: &mut Array1<i32>) {
             num_gaps
         );
     }
-
-    // Scale time steps (units = seconds)
-    *timestamps = timestamps.mapv(|x| (x as f32 / header.sample_rate) as i32);
 }
 
 /// Scales amplifier data from raw ADC values to microvolts
