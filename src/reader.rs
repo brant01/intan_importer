@@ -13,12 +13,12 @@ const RHS_MAGIC_NUMBER: u32 = 0xd69127ac;
 const SAMPLES_PER_DATA_BLOCK: usize = 128;
 const PRINT_PROGRESS_STEP: usize = 10;
 
-// Scaling constants
-const AMPLIFIER_SCALE_FACTOR: f32 = 0.195; // μV per bit
-const DC_AMPLIFIER_SCALE_FACTOR: f32 = -0.01923; // V per bit
-const ADC_DAC_SCALE_FACTOR: f32 = 312.5e-6; // V per bit
-const DC_AMPLIFIER_OFFSET: f32 = 512.0;
-const ADC_DAC_OFFSET: f32 = 32768.0;
+// Scaling constants (from Intan RHS data format specification)
+const AMPLIFIER_SCALE_FACTOR: f64 = 0.195; // μV per bit
+const DC_AMPLIFIER_SCALE_FACTOR: f64 = 19.23; // mV per bit (note: positive, not negative)
+const ADC_DAC_SCALE_FACTOR: f64 = 0.0003125; // V per bit (312.5 μV = 0.0003125 V)
+const DC_AMPLIFIER_OFFSET: f64 = 512.0;
+const ADC_DAC_OFFSET: f64 = 32768.0;
 
 /// Loads an RHS file and returns a strongly-typed struct representation.
 ///
@@ -1039,8 +1039,7 @@ fn process_data(
 
     // Process amplifier data
     if let Some(amp_data_raw) = raw_data.amplifier_data_raw {
-        let mut amp_data = amp_data_raw.clone();
-        scale_amplifier_data(&mut amp_data);
+        let mut amp_data = scale_amplifier_data(&amp_data_raw);
 
         // Apply notch filter if necessary
         apply_notch_filter(header, &mut amp_data);
@@ -1050,8 +1049,7 @@ fn process_data(
 
     // Process DC amplifier data
     if let Some(dc_amp_data_raw) = raw_data.dc_amplifier_data_raw {
-        let mut dc_amp_data = dc_amp_data_raw.clone();
-        scale_dc_amplifier_data(&mut dc_amp_data);
+        let dc_amp_data = scale_dc_amplifier_data(&dc_amp_data_raw);
         data.dc_amplifier_data = Some(dc_amp_data);
     }
 
@@ -1068,15 +1066,13 @@ fn process_data(
 
     // Process board ADC data
     if let Some(adc_data_raw) = raw_data.board_adc_data_raw {
-        let mut adc_data = adc_data_raw.clone();
-        scale_adc_data(&mut adc_data);
+        let adc_data = scale_adc_data(&adc_data_raw);
         data.board_adc_data = Some(adc_data);
     }
 
     // Process board DAC data
     if let Some(dac_data_raw) = raw_data.board_dac_data_raw {
-        let mut dac_data = dac_data_raw.clone();
-        scale_dac_data(&mut dac_data);
+        let dac_data = scale_dac_data(&dac_data_raw);
         data.board_dac_data = Some(dac_data);
     }
 
@@ -1121,33 +1117,67 @@ fn check_timestamps(timestamps: &Array1<i32>) {
 /// Scales amplifier data from raw ADC values to microvolts
 ///
 /// Uses the scaling factor of 0.195 μV/bit with an offset of 32768
-fn scale_amplifier_data(data: &mut Array2<i32>) {
-    // Scale amplifier data (units = microVolts)
-    *data = data.mapv(|x| (AMPLIFIER_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
+/// Raw values are treated as unsigned 16-bit integers
+fn scale_amplifier_data(data_raw: &Array2<i32>) -> Array2<f64> {
+    // Convert from signed to unsigned representation, then scale to microvolts
+    data_raw.mapv(|x| {
+        // Data was read as signed int16 but represents unsigned uint16 values
+        let unsigned_val = if x < 0 { 
+            (x + 65536) as f64 
+        } else { 
+            x as f64 
+        };
+        (unsigned_val - ADC_DAC_OFFSET) * AMPLIFIER_SCALE_FACTOR
+    })
 }
 
 /// Scales DC amplifier data from raw ADC values to volts
 ///
-/// Uses the scaling factor of -0.01923 V/bit with an offset of 512
-fn scale_dc_amplifier_data(data: &mut Array2<i32>) {
-    // Scale DC amplifier data (units = Volts)
-    *data = data.mapv(|x| (DC_AMPLIFIER_SCALE_FACTOR * (x as f32 - DC_AMPLIFIER_OFFSET)) as i32);
+/// Uses the scaling factor of 19.23 mV/bit with an offset of 512
+/// Returns values in volts (not millivolts) for consistency
+fn scale_dc_amplifier_data(data_raw: &Array2<i32>) -> Array2<f64> {
+    // Convert from signed to unsigned, then scale to millivolts and convert to volts
+    data_raw.mapv(|x| {
+        let unsigned_val = if x < 0 { 
+            (x + 65536) as f64 
+        } else { 
+            x as f64 
+        };
+        // Scale to millivolts then convert to volts
+        ((unsigned_val - DC_AMPLIFIER_OFFSET) * DC_AMPLIFIER_SCALE_FACTOR) / 1000.0
+    })
 }
 
 /// Scales ADC data from raw ADC values to volts
 ///
-/// Uses the scaling factor of 312.5 μV/bit with an offset of 32768
-fn scale_adc_data(data: &mut Array2<i32>) {
-    // Scale board ADC data (units = Volts)
-    *data = data.mapv(|x| (ADC_DAC_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
+/// Uses the scaling factor of 0.0003125 V/bit with an offset of 32768
+/// Raw values are treated as unsigned 16-bit integers
+fn scale_adc_data(data_raw: &Array2<i32>) -> Array2<f64> {
+    // Convert from signed to unsigned representation, then scale to volts
+    data_raw.mapv(|x| {
+        let unsigned_val = if x < 0 { 
+            (x + 65536) as f64 
+        } else { 
+            x as f64 
+        };
+        (unsigned_val - ADC_DAC_OFFSET) * ADC_DAC_SCALE_FACTOR
+    })
 }
 
 /// Scales DAC data from raw DAC values to volts
 ///
-/// Uses the scaling factor of 312.5 μV/bit with an offset of 32768
-fn scale_dac_data(data: &mut Array2<i32>) {
-    // Scale board DAC data (units = Volts)
-    *data = data.mapv(|x| (ADC_DAC_SCALE_FACTOR * (x as f32 - ADC_DAC_OFFSET)) as i32);
+/// Uses the scaling factor of 0.0003125 V/bit with an offset of 32768
+/// Raw values are treated as unsigned 16-bit integers
+fn scale_dac_data(data_raw: &Array2<i32>) -> Array2<f64> {
+    // Convert from signed to unsigned representation, then scale to volts
+    data_raw.mapv(|x| {
+        let unsigned_val = if x < 0 { 
+            (x + 65536) as f64 
+        } else { 
+            x as f64 
+        };
+        (unsigned_val - ADC_DAC_OFFSET) * ADC_DAC_SCALE_FACTOR
+    })
 }
 
 // Helper function to extract stim data
@@ -1223,7 +1253,7 @@ fn extract_digital_data(
 }
 
 // Helper function to apply notch filter
-fn apply_notch_filter(header: &RhsHeader, data: &mut Array2<i32>) {
+fn apply_notch_filter(header: &RhsHeader, data: &mut Array2<f64>) {
     // If data was not recorded with notch filter turned on, return without applying notch filter
     if header.notch_filter_frequency.is_none() {
         return;
@@ -1244,16 +1274,16 @@ fn apply_notch_filter(header: &RhsHeader, data: &mut Array2<i32>) {
     let num_channels = data.shape()[0];
 
     for i in 0..num_channels {
-        // Convert channel data to f64 for filtering
-        let channel_data: Vec<f64> = data.slice(s![i, ..]).iter().map(|&x| x as f64).collect();
+        // Get channel data
+        let channel_data: Vec<f64> = data.slice(s![i, ..]).to_vec();
 
         // Apply notch filter
         let filtered_data = notch_filter(&channel_data, header.sample_rate, notch_freq, 10);
 
-        // Convert back to i32 and update the array
+        // Update the array
         let mut slice = data.slice_mut(s![i, ..]);
         for (j, &value) in filtered_data.iter().enumerate() {
-            slice[j] = value as i32;
+            slice[j] = value;
         }
 
         // Print progress

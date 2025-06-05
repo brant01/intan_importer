@@ -245,10 +245,10 @@ pub struct RhsData {
     pub timestamps: Array1<i32>,
     /// Neural data from amplifier channels (μV)
     /// - Shape: [num_channels, num_samples]
-    pub amplifier_data: Option<Array2<i32>>,
+    pub amplifier_data: Option<Array2<f64>>,
     /// DC amplifier data (V)
     /// - Shape: [num_channels, num_samples]
-    pub dc_amplifier_data: Option<Array2<i32>>,
+    pub dc_amplifier_data: Option<Array2<f64>>,
     /// Stimulation current data (μA)
     /// - Shape: [num_channels, num_samples]
     pub stim_data: Option<Array2<i32>>,
@@ -269,10 +269,10 @@ pub struct RhsData {
     pub amp_settle_data: Option<Array2<bool>>,
     /// Board ADC data (V)
     /// - Shape: [num_channels, num_samples]
-    pub board_adc_data: Option<Array2<i32>>,
+    pub board_adc_data: Option<Array2<f64>>,
     /// Board DAC data (V)
     /// - Shape: [num_channels, num_samples]
-    pub board_dac_data: Option<Array2<i32>>,
+    pub board_dac_data: Option<Array2<f64>>,
     /// Board digital input data (0 or 1)
     /// - Shape: [num_channels, num_samples]
     pub board_dig_in_data: Option<Array2<i32>>,

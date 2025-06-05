@@ -1,6 +1,6 @@
 [package]
 name = "intan_importer"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "A Rust library for importing and processing Intan RHS data files for neural recording research"
 authors = ["JB"]

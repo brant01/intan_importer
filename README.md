@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-intan_importer = "0.2.0"
+intan_importer = "0.2.4"
 ```
 
 ## Quick Start
@@ -108,10 +108,13 @@ RhsFile {
         timestamps: Array1<i32>,
         
         // Neural data (in microvolts)
-        amplifier_data: Option<Array2<i32>>,
+        amplifier_data: Option<Array2<f64>>,
         
         // Stimulation data (in microamps)
         stim_data: Option<Array2<i32>>,
+        
+        // Analog input data (in volts)
+        board_adc_data: Option<Array2<f64>>,
         
         // Digital events
         board_dig_in_data: Option<Array2<i32>>,
@@ -140,10 +143,10 @@ fn analyze_channels(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 
                 // Calculate basic statistics
                 let mean = channel_data.mean().unwrap_or(0.0);
-                let max = channel_data.iter().max().copied().unwrap_or(0);
-                let min = channel_data.iter().min().copied().unwrap_or(0);
+                let max = channel_data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let min = channel_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 
-                println!("Channel {}: mean={:.2}μV, range=[{}, {}]μV", 
+                println!("Channel {}: mean={:.2}μV, range=[{:.2}, {:.2}]μV", 
                          channel.custom_channel_name, mean, min, max);
             }
         }
